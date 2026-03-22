@@ -96,6 +96,10 @@ When ViewportTracker switches active source (e.g., Pointer → Focus), the offse
 
 ---
 
+## Startup Settings Application (BF-1)
+
+On the first frame tick, `s_firstTick` forces unconditional application of the settings snapshot — including color inversion — regardless of version comparison. This is necessary because `s_cachedSettingsVersion` and `SharedState::settingsVersion` both initialize to 0, so the version-mismatch check alone would skip the settings block when no config change has occurred since initialization. The flag is reset after the first tick and re-set in `RenderLoop::start()` for restart correctness.
+
 ## Common Mistakes
 
 These are specific errors to watch for when writing or reviewing RenderLoop code.

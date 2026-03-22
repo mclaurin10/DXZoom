@@ -86,6 +86,11 @@ static bool s_reverseScrollDirection = false;
 // Render thread only (no contention). (AC-2.10.01–AC-2.10.05)
 static bool s_colorInversionActive = false;
 
+// BF-1: Force initial settings application on first tick (AC-2.10.04).
+// Without this, color inversion from config.json is not applied on startup because
+// s_cachedSettingsVersion and settingsVersion both start at 0 (no version mismatch).
+static bool s_firstTick = true;
+
 // MagBridge error tracking — log on state transitions only (not every frame)
 static bool s_magBridgeLastOk = true;
 
@@ -125,6 +130,7 @@ void RenderLoop::start(SharedState& state)
     s_state = &state;
     shutdownRequested_.store(false, std::memory_order_relaxed);
     initComplete_.store(false, std::memory_order_relaxed);
+    s_firstTick = true;
 
     // Initialize frame timing for dt computation
     LARGE_INTEGER freq, now;
@@ -227,7 +233,7 @@ void RenderLoop::frameTick()
     // 0. Check for settings changes (Phase 5B: AC-2.9.04–AC-2.9.09)
     //    One atomic uint64 load per frame (common case). shared_ptr load only on change.
     uint64_t ver = s_state->settingsVersion.load(std::memory_order_acquire);
-    if (ver != s_cachedSettingsVersion)
+    if (ver != s_cachedSettingsVersion || s_firstTick)
     {
         auto snap = std::atomic_load(&s_state->settingsSnapshot);
         if (snap)
@@ -241,13 +247,16 @@ void RenderLoop::frameTick()
             s_reverseScrollDirection = snap->reverseScrollDirection;
 
             // Phase 6: Sync color inversion from settings (AC-2.10.03, AC-2.10.04)
-            if (snap->colorInversionEnabled != s_colorInversionActive)
+            // BF-1: On first tick, force-apply regardless of state match to ensure
+            // persisted colorInversionEnabled=true is applied on startup.
+            if (snap->colorInversionEnabled != s_colorInversionActive || s_firstTick)
             {
                 s_colorInversionActive = snap->colorInversionEnabled;
                 s_magBridge.setColorInversion(s_colorInversionActive);
             }
         }
         s_cachedSettingsVersion = ver;
+        s_firstTick = false;
         SZ_LOG_DEBUG("RenderLoop", L"Settings applied (version %llu)", static_cast<unsigned long long>(ver));
     }
 
