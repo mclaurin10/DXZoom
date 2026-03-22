@@ -20,6 +20,7 @@ namespace SmoothZoom
 static constexpr UINT WM_OPEN_SETTINGS = WM_APP + 1;
 static constexpr UINT WM_TRAYICON      = WM_APP + 2;
 static constexpr UINT WM_GRACEFUL_EXIT = WM_APP + 3;
+static constexpr UINT WM_UPDATE_TRAY_ICON = WM_APP + 4;
 
 // Context menu command IDs
 static constexpr UINT IDM_SETTINGS     = 40001;

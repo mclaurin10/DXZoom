@@ -25,6 +25,7 @@
 #pragma comment(lib, "Magnification.lib")
 
 #include "smoothzoom/common/AppMessages.h"
+#include "resource.h"
 #include "smoothzoom/common/SharedState.h"
 #include "smoothzoom/input/InputInterceptor.h"
 #include "smoothzoom/input/FocusMonitor.h"
@@ -68,11 +69,18 @@ static std::string g_configPath;                      // Resolved at startup
 static constexpr UINT_PTR kWatchdogTimerId = 1;
 static constexpr UINT kWatchdogIntervalMs = 5000;
 
+// Tray icon state polling timer (zoom idle/active)
+static constexpr UINT_PTR kTrayIconTimerId = 2;
+static constexpr UINT kTrayIconIntervalMs = 250;
+
 // Hook failure notification flag (AC-ERR.03) — suppress repeated balloons
 static bool s_hookFailureNotified = false;
 
 // Session lock state (AC-ERR.04) — suppress hook-failure balloons during lock/UAC
 static bool s_sessionLocked = false;
+
+// Tray icon zoom-state hysteresis — only update icon on transitions
+static bool s_trayIconShowsZoomed = false;
 
 // Sentinel path for dirty-shutdown detection (R-14, E6.11)
 static std::filesystem::path s_sentinelPath;
@@ -189,6 +197,7 @@ static bool terminateMagnifyExe(DWORD pid)
 using SmoothZoom::WM_OPEN_SETTINGS;
 using SmoothZoom::WM_TRAYICON;
 using SmoothZoom::WM_GRACEFUL_EXIT;
+using SmoothZoom::WM_UPDATE_TRAY_ICON;
 using SmoothZoom::IDM_SETTINGS;
 using SmoothZoom::IDM_TOGGLE_ZOOM;
 using SmoothZoom::IDM_EXIT;
@@ -570,6 +579,17 @@ static LRESULT CALLBACK msgWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
                 }
             }
         }
+        else if (wParam == kTrayIconTimerId)
+        {
+            // Poll zoom level and update tray icon on state transitions
+            float zoom = g_sharedState.currentZoomLevel.load(std::memory_order_relaxed);
+            bool isZoomed = (zoom > 1.005f);
+            if (isZoomed != s_trayIconShowsZoomed)
+            {
+                s_trayIconShowsZoomed = isZoomed;
+                g_trayUI.updateTrayIcon(isZoomed);
+            }
+        }
         // Phase 5C: Graceful exit polling
         else if (g_trayUI.isExitPending() && g_trayUI.checkExitPoll())
         {
@@ -587,6 +607,10 @@ static LRESULT CALLBACK msgWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
 
     case WM_GRACEFUL_EXIT:
         g_trayUI.requestGracefulExit();
+        return 0;
+
+    case WM_UPDATE_TRAY_ICON:
+        g_trayUI.updateTrayIcon(wParam != 0);
         return 0;
 
     case WM_COMMAND:
@@ -759,6 +783,8 @@ static HWND createMessageWindow(HINSTANCE hInstance)
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = msgWndProc;
     wc.hInstance = hInstance;
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCE(IDI_APP_ICON));
+    wc.hIconSm = LoadIconW(hInstance, MAKEINTRESOURCE(IDI_APP_ICON));
     wc.lpszClassName = L"SmoothZoomMsgWindow";
 
     RegisterClassExW(&wc);
@@ -947,6 +973,10 @@ int WINAPI wWinMain(
     g_trayUI.create(hInstance, g_msgWindow, g_sharedState, g_settingsManager,
                     g_configPath.c_str());
 
+    // Start tray icon zoom-state polling timer
+    if (g_msgWindow)
+        SetTimer(g_msgWindow, kTrayIconTimerId, kTrayIconIntervalMs, nullptr);
+
     // ── 2e. Start-zoomed (Phase 5C: AC-2.9.18–19) ──────────────────────────
     {
         auto snap = g_settingsManager.snapshot();
@@ -982,6 +1012,7 @@ int WINAPI wWinMain(
     {
         WTSUnRegisterSessionNotification(g_msgWindow);
         KillTimer(g_msgWindow, kWatchdogTimerId);
+        KillTimer(g_msgWindow, kTrayIconTimerId);
         DestroyWindow(g_msgWindow);
         g_msgWindow = nullptr;
     }

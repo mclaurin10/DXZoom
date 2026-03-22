@@ -124,6 +124,9 @@ add_library(smoothzoom_support STATIC
 target_include_directories(smoothzoom_support PUBLIC
     ${CMAKE_SOURCE_DIR}/include
 )
+target_include_directories(smoothzoom_support PRIVATE
+    ${CMAKE_SOURCE_DIR}/res
+)
 target_link_libraries(smoothzoom_support PUBLIC
     smoothzoom_common
     nlohmann_json
@@ -143,6 +146,9 @@ endif()
 add_executable(SmoothZoom WIN32
     src/app/main.cpp
     res/SmoothZoom.rc
+)
+target_include_directories(SmoothZoom PRIVATE
+    ${CMAKE_SOURCE_DIR}/res
 )
 target_link_libraries(SmoothZoom PRIVATE
     smoothzoom_input

@@ -1,2 +1,5 @@
-// SmoothZoom resource script — embeds app icon into the executable
-IDI_ICON1 ICON "SmoothZoom.ico"
+#include "resource.h"
+
+IDI_APP_ICON    ICON    "../assets/icons/production/app.ico"
+IDI_TRAY_IDLE   ICON    "../assets/icons/production/tray_idle.ico"
+IDI_TRAY_ACTIVE ICON    "../assets/icons/production/tray_active.ico"

@@ -6,6 +6,7 @@
 
 #include "smoothzoom/support/TrayUI.h"
 #include "smoothzoom/common/AppMessages.h"
+#include "resource.h"
 #include "smoothzoom/common/SharedState.h"
 #include "smoothzoom/common/Types.h"
 #include "smoothzoom/support/SettingsManager.h"
@@ -259,7 +260,7 @@ bool TrayUI::create(HINSTANCE hInstance, HWND msgWindow, SharedState& state,
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = L"SmoothZoomSettings";
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(hInstance_, MAKEINTRESOURCE(IDI_APP_ICON));
     RegisterClassExW(&wc);
 
     addTrayIcon();
@@ -285,7 +286,7 @@ void TrayUI::addTrayIcon()
     nid.uID = kTrayIconId;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    nid.hIcon = LoadIconW(hInstance_, MAKEINTRESOURCE(IDI_TRAY_IDLE));
     wcscpy_s(nid.szTip, L"SmoothZoom");
     Shell_NotifyIconW(NIM_ADD, &nid);
 
@@ -811,6 +812,19 @@ bool TrayUI::checkExitPoll()
     }
 
     return false;
+}
+
+void TrayUI::updateTrayIcon(bool isZoomed)
+{
+    NOTIFYICONDATAW nid = {};
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = msgWindow_;
+    nid.uID = kTrayIconId;
+    nid.uFlags = NIF_ICON | NIF_TIP;
+    nid.hIcon = LoadIconW(hInstance_,
+        MAKEINTRESOURCE(isZoomed ? IDI_TRAY_ACTIVE : IDI_TRAY_IDLE));
+    wcscpy_s(nid.szTip, isZoomed ? L"SmoothZoom (Zoomed)" : L"SmoothZoom");
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 } // namespace SmoothZoom
