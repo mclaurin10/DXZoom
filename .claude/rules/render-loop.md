@@ -4,7 +4,7 @@ paths:
 ---
 # RenderLoop — Frame Tick Engine
 
-Runs on the **Render Thread**. The central coordination point: every frame, it reads shared state, computes interpolated values, and makes the single MagBridge call that updates the display.
+Runs on the **Render Thread**. The central coordination point: every frame, it reads shared state, computes interpolated values, and makes the single DDABridge call that updates the display.
 
 ## Hot Path Invariants
 
@@ -23,39 +23,23 @@ frameTick():
     2. Drain keyboard commands   — lock-free queue tryPop() loop
     3. Apply scroll to zoom      — ZoomController.applyScrollDelta() if delta ≠ 0
     4. Interpolate zoom          — if ANIMATING or TOGGLING mode, ease-out toward target
-    5. Compute viewport offset   — GetCursorPos() for pointer, SeqLock for focus/caret
-    6. Call MagBridge             — only if zoom or offset changed since last frame
+    5. Compute viewport offset   — GetCursorPos() for pointer (focus/caret tracking out of scope)
+    6. Call DDABridge            — only if zoom or offset changed since last frame
 ```
-
-## Message Pump Requirement
-
-The render thread's frame loop includes a `PeekMessage`/`DispatchMessage` pump between `frameTick()` and `DwmFlush()`. This is **required** for `MagSetFullscreenTransform` viewport offsets to take effect. The Magnification API uses internal DWM messages to apply offsets; without a message pump on the calling thread, offsets are silently ignored while the zoom factor still applies correctly.
-
-```
-while not shutdownRequested:
-    frameTick()
-    PeekMessage / TranslateMessage / DispatchMessage loop
-    DwmFlush()
-```
-
-**Hot path safety:** `PeekMessage` with no pending messages is ~1µs, no heap allocation, no mutex. The render thread has no windows and no hooks, so unexpected messages are not a concern.
-
-**Note:** `MagSetInputTransform` is intentionally not called per-frame. With proportional mapping (`offset = pos * (1 - 1/zoom)`), `desktop_under_cursor == screen_position`, so clicks land correctly without input remapping. Enabling it causes a feedback loop when combined with `GetCursorPos()` (which returns remapped coords when input transform is active).
 
 ## Thread Lifecycle
 
-MagBridge initialization and shutdown happen inside `threadMain()` so all Mag* API calls share the same thread (thread affinity requirement). The main thread spin-waits on `initComplete_` to detect init failure.
+DDABridge initialization and shutdown happen inside `threadMain()` so all DXGI/D3D11 calls share the same thread (thread affinity requirement). The main thread spin-waits on `initComplete_` to detect init failure.
 
 ```
 renderThreadMain():
-    MagBridge.initialize()       // Thread affinity: same thread as SetFullscreenTransform
+    DDABridge.initialize()       // Create D3D device, swap chain, duplication object
     signal initComplete
     while not shutdownRequested:
         frameTick()
-        PeekMessage / DispatchMessage loop   // Required for Mag* offset processing
         DwmFlush()               // Blocks until next VSync
-    MagBridge.setTransform(1.0)  // Reset zoom
-    MagBridge.shutdown()         // MagUninitialize on same thread as MagInitialize
+    DDABridge.setTransform(1.0, 0, 0)  // Reset zoom (hides overlay at 1.0×)
+    DDABridge.shutdown()         // Release all resources
 ```
 
 `DwmFlush()` ties the loop to the display's refresh rate. 60Hz → 60 ticks/s. 144Hz → 144 ticks/s.
@@ -67,12 +51,12 @@ newValue = current + (target - current) * speed
 // speed ≈ 0.15 per frame → ~90% complete in ~150ms at 60fps
 ```
 
-This handles mid-animation retargeting naturally: when `target` changes, the gap recalculates each frame. No special cancellation or queuing logic needed. (AC-2.2.06, AC-2.2.07)
+This handles mid-animation retargeting naturally: when `target` changes, the gap recalculates each frame. No special cancellation or queuing logic needed.
 
 ## Optimization: Skip Redundant API Calls
 
-- If zoom and offset are identical to last frame's values, skip `MagBridge.setTransform()`. Only `DwmFlush()` runs.
-- At zoom 1.0× with no active animation: skip all computation. The loop is effectively idle. (AC-2.3.13)
+- If zoom and offset are identical to last frame's values, skip `DDABridge.setTransform()`. Only `DwmFlush()` runs.
+- At zoom 1.0× with no active animation: skip all computation. The loop is effectively idle. DDABridge hides the overlay and pauses capture at 1.0×.
 - This is critical for meeting the <2% CPU target when zoomed but pointer stationary.
 
 ## Performance Targets
@@ -82,23 +66,15 @@ This handles mid-animation retargeting naturally: when `target` changes, the gap
 - CPU, zoomed + pointer stationary: <2%
 - CPU, zoomed + pointer moving: <5%
 
-## Adaptive Frame Rate (R-18 contingency)
+## Adaptive Frame Rate (Contingency)
 
 If CPU exceeds targets on 240Hz displays despite optimizations: implement adaptive pacing where the loop runs at a lower rate (e.g., 60Hz) during idle periods, ramping to full VSync only during active input.
 
 ---
 
-## ⛔ Phase 3+ Only — Do NOT Implement Before Phase 3
+## Startup Settings Application
 
-### Source Transition Smoothing (Phase 3+)
-
-When ViewportTracker switches active source (e.g., Pointer → Focus), the offset target jumps. Smooth this with a 200ms transition animation, not an instant snap. The RenderLoop detects source changes and manages the transition interpolation.
-
----
-
-## Startup Settings Application (BF-1)
-
-On the first frame tick, `s_firstTick` forces unconditional application of the settings snapshot — including color inversion — regardless of version comparison. This is necessary because `s_cachedSettingsVersion` and `SharedState::settingsVersion` both initialize to 0, so the version-mismatch check alone would skip the settings block when no config change has occurred since initialization. The flag is reset after the first tick and re-set in `RenderLoop::start()` for restart correctness.
+On the first frame tick, `s_firstTick` forces unconditional application of the settings snapshot — including texture sampler mode (bilinear vs nearest-neighbor) — regardless of version comparison. This is necessary because `s_cachedSettingsVersion` and `SharedState::settingsVersion` both initialize to 0, so the version-mismatch check alone would skip the settings block when no config change has occurred since initialization. The flag is reset after the first tick and re-set in `RenderLoop::start()` for restart correctness.
 
 ## Common Mistakes
 
@@ -110,18 +86,18 @@ These are specific errors to watch for when writing or reviewing RenderLoop code
 
 3. **Acquiring a mutex to read settings.** Settings use copy-on-write with atomic pointer swap. The render thread reads through the atomic snapshot pointer. Never lock a mutex to read configuration values during `frameTick()`.
 
-4. **Calling `MagSetInputTransform` per-frame alongside `setTransform`.** With proportional viewport mapping, input transform is mathematically redundant and causes a feedback loop with `GetCursorPos()`. The render loop only calls `setTransform()`. `MagBridge::shutdown()` handles disabling input transform on exit.
+4. **Forgetting to check `shutdownRequested` before `DwmFlush()`.** `DwmFlush()` blocks until VSync. If shutdown is requested mid-frame, the thread should exit promptly, not wait for the next VSync.
 
-5. **Forgetting to check `shutdownRequested` before `DwmFlush()`.** `DwmFlush()` blocks until VSync. If shutdown is requested mid-frame, the thread should exit promptly, not wait for the next VSync.
+5. **Using `Sleep()` or `WaitableTimer` instead of `DwmFlush()`.** `DwmFlush()` synchronizes to the actual display VSync. Manual timers drift, causing either dropped frames or wasted cycles. Only fall back to manual timing if `DwmFlush()` is unavailable.
 
-6. **Using `Sleep()` or `WaitableTimer` instead of `DwmFlush()`.** `DwmFlush()` synchronizes to the actual display VSync. Manual timers drift, causing either dropped frames or wasted cycles. Only fall back to manual timing if `DwmFlush()` is unavailable (see Architecture §2.2).
+6. **Logging every frame.** Even a lightweight log call per frame at 144Hz = 144 writes/second. Log only on state transitions (zoom started, zoom ended, error detected, `DXGI_ERROR_ACCESS_LOST` recovery).
 
-7. **Adding source transition smoothing before Phase 3.** ViewportTracker doesn't support multiple input sources until Phase 3 delivers UIA integration. Source transitions before that phase are dead code.
+7. **Not skipping the DDABridge call when values haven't changed.** At idle (zoomed, pointer stationary), the frame tick should cost nearly zero. Redundant API calls waste CPU and may add latency.
 
-8. **Logging every frame.** Even a lightweight log call per frame at 144Hz = 144 writes/second. Log only on state transitions (zoom started, zoom ended, source changed, error detected).
+8. **Reading pointer position from SharedState atomics instead of `GetCursorPos()`.** The low-level mouse hook's `WM_MOUSEMOVE` events are not reliably delivered when a fullscreen overlay is active. `GetCursorPos()` is a fast shared-memory read (~1µs) that always returns the true cursor position.
 
-9. **Not skipping the MagBridge call when values haven't changed.** At idle (zoomed, pointer stationary), the frame tick should cost nearly zero. Redundant API calls waste CPU and may add latency.
+9. **Calling DDABridge methods from the wrong thread.** All DDABridge methods must be called from the Render Thread. The D3D11 device context is not thread-safe. Calling `setTransform()` from another thread causes undefined behavior.
 
-10. **Reading pointer position from SharedState atomics instead of `GetCursorPos()`.** The low-level mouse hook's `WM_MOUSEMOVE` events are not reliably delivered when the fullscreen magnifier is active. `GetCursorPos()` is a fast shared-memory read (~1µs) that always returns the true cursor position.
+10. **Forgetting to call `DDABridge.setTransform(1.0, 0, 0)` before shutdown.** At zoom 1.0×, DDABridge hides the overlay and pauses capture. Calling `setTransform(1.0, 0, 0)` ensures clean state before releasing resources.
 
-11. **Not pumping messages on the render thread.** `MagSetFullscreenTransform` offsets are silently ignored if the calling thread has no message pump. The zoom factor applies but the viewport stays anchored at (0,0). The `PeekMessage`/`DispatchMessage` loop after `frameTick()` is not optional — it enables the Magnification API's internal DWM message processing.
+11. **Adding source transition smoothing before it's needed.** ViewportTracker is pointer-only in this fork. Focus and caret tracking are out of scope. Source transitions between pointer, focus, and caret are not implemented.

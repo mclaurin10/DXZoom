@@ -1,25 +1,36 @@
-# SmoothZoom
+# SmoothZoom-DDA
 
-Full-screen magnification for Windows, inspired by macOS Accessibility Zoom. Hold Win+Scroll to smoothly zoom the entire desktop up to 10× — the viewport follows your cursor naturally with fluid, pointer-centered tracking. No stepped increments, no jarring jumps. Native C++17, pure Win32, using the Windows Magnification API.
+Full-screen magnification for Windows using the Desktop Duplication API. Hold Win+Scroll to smoothly zoom the entire desktop up to 10× — the viewport follows your cursor naturally with fluid, pointer-centered tracking. No stepped increments, no jarring jumps. Native C++17, pure Win32, Direct3D 11.
+
+## Why This Fork Exists
+
+This is a fork of [SmoothZoom](https://github.com/original/smoothzoom), which used the Windows Magnification API. The Magnification API is legacy technology — Microsoft recommends the Desktop Duplication API or `Windows.Graphics.Capture` for new screen-capture applications. The Magnification API also imposed hard constraints: binaries must have `UIAccess="true"`, must be code-signed, and must run from secure folders like `Program Files`. The Desktop Duplication API removes all of these requirements.
+
+The tradeoff is that Desktop Duplication requires building the capture, rendering, input-passthrough, and cursor-drawing pipeline from scratch — things the Magnification API provided for free. This fork implements that pipeline.
 
 ## Current Status
 
-**Phase 6 — Polish & Hardening** (in progress). All core features are implemented and functional. Testing and stabilization underway.
+**Phase 0 — Capture and Render Spike** (planned). Implementation has not yet started.
 
-## Key Features
+## Features
 
 - **Scroll-gesture zoom** — Hold Win and scroll to zoom in/out continuously
 - **Pointer-centered viewport tracking** — The magnified view follows your cursor proportionally across the desktop
 - **Keyboard shortcuts** — Win+Plus/Minus for animated step zoom, Win+Esc to reset
 - **Animated transitions** — Ease-out zoom animations with retargeting and scroll-interrupts-animation
-- **Focus following** — Viewport tracks keyboard focus changes via UI Automation
-- **Caret following** — Viewport tracks the text cursor during active typing
 - **Temporary toggle** — Hold Ctrl+Alt to peek at zoom/unzoom, release to restore
 - **Settings persistence** — JSON config file with hot-reload
 - **System tray icon** — Right-click for settings window and exit
-- **Color inversion** — Accessibility color inversion mode
-- **Multi-monitor support** — Basic multi-monitor awareness
-- **Crash recovery** — Exception handler resets zoom; dirty-shutdown sentinel detection
+- **Crash recovery** — Exception handler and dirty-shutdown detection
+
+## What's NOT Included (Out of Scope)
+
+This fork focuses on single-monitor pointer-based zoom. The following features from the original SmoothZoom are **explicitly out of scope**:
+
+- Multi-monitor support
+- Color inversion / color effect shaders
+- Keyboard focus following (UI Automation)
+- Text cursor / caret following (UI Automation)
 
 ## Controls
 
@@ -34,37 +45,20 @@ Full-screen magnification for Windows, inspired by macOS Accessibility Zoom. Hol
 
 ## Build Requirements
 
-- **Windows 10 1903+** (build 18362)
+- **Windows 10 version 2004+** (build 19041) for `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`
 - **Visual Studio 2022** with C++ desktop workload and Windows SDK
 - **CMake 3.20+**
-- **x64 only** — Magnification API is unsupported under WOW64
-- **UIAccess manifest** — Binary must declare `uiAccess="true"`
-- **Code signing** — Binary must be signed and run from a secure folder (e.g., `C:\Program Files\SmoothZoom\`)
+- **x64 only**
+- **No code signing or UIAccess required** — the Desktop Duplication API does not need them
 
 ## How to Build and Run
 
 ```powershell
-# 1. One-time: create dev signing cert (elevated PowerShell)
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\dev_sign_setup.ps1
-
-# 2. Build (from x64 Native Tools Command Prompt for VS 2022)
+# Build (from x64 Native Tools Command Prompt for VS 2022)
 scripts\build.bat
 
-# 3. Sign the binaries
-.\scripts\sign-binary.ps1
-
-# 4. Install to secure folder (elevated PowerShell)
-.\scripts\install-secure.ps1
-
-# 5. Run
-& "C:\Program Files\SmoothZoom\SmoothZoom.exe"
-```
-
-Or use the all-in-one deploy script:
-
-```powershell
-.\scripts\deploy.ps1
+# Run
+.\build\Debug\SmoothZoom.exe
 ```
 
 ### Unit Tests
@@ -78,29 +72,35 @@ Tests cover pure logic components (ZoomController, ViewportTracker, WinKeyManage
 
 ## Architecture Overview
 
-Ten components across four layers, running on four threads:
+Nine components across four layers, running on two threads:
 
 ```
-Input Layer:   InputInterceptor · WinKeyManager · FocusMonitor · CaretMonitor
+Input Layer:   InputInterceptor · WinKeyManager
 Logic Layer:   ZoomController · ViewportTracker · RenderLoop
-Output Layer:  MagBridge
+Output Layer:  DDABridge · CursorRenderer
 Support Layer: SettingsManager · TrayUI
 ```
 
 | Thread | Responsibility |
 |--------|---------------|
 | **Main** | Message pump, low-level hooks, TrayUI, app lifecycle |
-| **Render** | VSync-locked frame ticks via `DwmFlush()`, calls MagBridge |
-| **UIA** | UI Automation focus subscriptions (isolated COM apartment) |
-| **Caret** | `GetGUIThreadInfo` polling at ~30 Hz (separate from UIA — UIA caret events are unreliable) |
+| **Render** | Desktop Duplication capture, D3D11 rendering, frame ticks via `DwmFlush()` |
 
 Communication between threads uses atomics, SeqLock, lock-free queues, and atomic pointer swap — no mutexes on the render hot path.
 
-See `docs/` for the five design documents covering scope, behavior specification (139 acceptance criteria), technical architecture, phased delivery plan, and risk mitigations.
+See `CLAUDE.md` and `docs/` for detailed design documentation.
 
 ## Known Limitations
 
-- **Image smoothing toggle deferred** — `MagSetFullscreenTransform` provides no filtering parameter. Nearest-neighbor mode (AC-2.3.08) and the toggle (AC-2.3.09) depend on a future Desktop Duplication API migration (R-01).
-- **CPU usage** — May exceed target in some scenarios; optimization ongoing in Phase 6.
-- **Windows Magnifier conflict** — Only one full-screen magnifier can run at a time. SmoothZoom detects the native Magnifier and advises the user.
-- **Secure desktop inaccessible** — Magnification API does not work on Ctrl+Alt+Delete, UAC prompts, or the lock screen.
+- **DRM-protected content appears black** — Netflix in Edge, some games with anti-cheat, and other HDCP-protected content will render as black in the magnified view. The Magnification API handled this transparently because it operated inside DWM compositing. Desktop Duplication captures post-compositing and is subject to HDCP restrictions. This is a known limitation of the Desktop Duplication API.
+- **Secure desktop inaccessible** — Desktop Duplication cannot capture Ctrl+Alt+Delete, UAC prompts, or the lock screen (same limitation as the Magnification API).
+- **Single-monitor only** — Multi-monitor support is out of scope for this fork.
+
+## Phase Plan
+
+| Phase | Name | Key Delivery | Status |
+|-------|------|-------------|--------|
+| 0 | Capture and Render Spike | Hardcoded 2× zoom overlay, 60fps capture, self-capture exclusion validation | Planned |
+| 1 | Input Passthrough and Cursor | Click-through overlay, software cursor rendering | Planned |
+| 2 | Scroll-Gesture Zoom | Win+Scroll zoom, proportional viewport tracking, Start Menu suppression | Planned |
+| 3 | Keyboard, Toggle, Settings, Polish | Animated transitions, temporary toggle, settings UI, tray, crash recovery | Planned |
