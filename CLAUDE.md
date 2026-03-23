@@ -1,112 +1,177 @@
-# SmoothZoom
+# SmoothZoom-DDA
 
-**Current Status:** Phase 6 — Polish & Hardening (in progress). Phases 0–5 complete.
+**Current Status:** Phase 0 — Capture and Render Spike (starting).
 
-Native C++17 Win32 full-screen magnifier for Windows. Hold Win+Scroll to smoothly zoom up to 10× with continuous viewport tracking of pointer, keyboard focus, and text cursor. Uses the Windows Magnification API.
-
-## Design Documents — Read Before Implementing
-
-Five docs and a research report fully specify this project. **Always consult the relevant doc before coding. Do not guess—look it up.**
-
-| Doc | File | Covers |
-|-----|------|--------|
-| 1 — Scope | `01_Project_Scope_and_Non-Scope.md` | In/out of scope, success criteria, constraints, settings |
-| 2 — Behavior Spec | `02_Behavior_Specification.md` | 139 acceptance criteria (AC-numbered). The authority on behavior. |
-| 3 — Architecture | `03_Technical_Architecture.md` | Components, threading, data flow, pseudocode, build/deploy |
-| 4 — Phases | `04_Phased_Delivery_Plan.md` | Seven phases (0–6), exit criteria, AC-to-phase mapping |
-| 5 — Risks | `05_Technical_Risks_and_Mitigations.md` | 22 risks (R-01–R-22) with mitigations |
-
-Cite **AC numbers** for behavior (e.g., AC-2.1.06), **risk IDs** for technical concerns (e.g., R-05), and **exit criteria** for phase gates (e.g., E1.4).
+Fork of SmoothZoom. Replaces the Windows Magnification API with the DXGI Desktop Duplication API (`IDXGIOutputDuplication`) and a Direct3D 11 rendering pipeline. Native C++17 Win32 full-screen magnifier for Windows. Hold Win+Scroll to smoothly zoom up to 10× with continuous pointer-based viewport tracking.
 
 ## Architecture
 
-Single-process, four layers, ten components:
+Single-process, three layers, eight components:
 
-- **Input Layer:** InputInterceptor (hooks), WinKeyManager (Win key + Start Menu suppression), FocusMonitor (UIA focus), CaretMonitor (UIA caret + GTTI polling)
-- **Logic Layer:** ZoomController (zoom state/animation), ViewportTracker (offset + source priority), RenderLoop (frame tick engine)
-- **Output Layer:** MagBridge (sole Magnification API wrapper — no other component calls Mag* functions)
+- **Input Layer:** InputInterceptor (hooks), WinKeyManager (Win key + Start Menu suppression)
+- **Logic Layer:** ZoomController (zoom state/animation), ViewportTracker (offset, pointer-only), RenderLoop (frame tick engine)
+- **Output Layer:** DDABridge (Desktop Duplication capture + D3D11 rendering + software cursor renderer)
 - **Support Layer:** SettingsManager (config.json + snapshots), TrayUI (tray icon + settings window)
 
-## Threading Model — Four Threads
+### Component Status
 
-**Main Thread:** Message pump, low-level hooks, TrayUI, app lifecycle.
-**Render Thread:** VSync-locked frame ticks via `DwmFlush()`, message pump for Mag API internals, calls MagBridge.
-**UIA Thread:** FocusMonitor event-driven UI Automation subscriptions, isolated COM apartment.
-**Caret Thread:** CaretMonitor GTTI polling at ~30Hz. Separate from UIA thread because UIA caret events are unreliable and polling must not block event-driven FocusMonitor.
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **DDABridge** | **New** (replaces MagBridge) | Sole DXGI/D3D11 touchpoint. Same `setTransform(float, int, int)` interface. |
+| **Software cursor renderer** | **New** (inside DDABridge) | `GetCursorInfo()` each frame, draws cursor icon at magnified position. |
+| InputInterceptor | Carries over unchanged | Global hooks, scroll consumption, pointer tracking, hook watchdog. |
+| WinKeyManager | Carries over unchanged | Win key state machine, Start Menu suppression. |
+| ZoomController | Carries over unchanged | SCROLL_DIRECT / ANIMATING / TOGGLING / IDLE modes. |
+| ViewportTracker | Carries over (simplified) | Pointer-only. No `determineActiveSource()`, no focus/caret SeqLock. |
+| RenderLoop | Carries over unchanged | Calls `ddaBridge.setTransform()` instead of `magBridge.setTransform()`. |
+| SettingsManager | Carries over unchanged | config.json in `%AppData%\SmoothZoom\`, atomic pointer swap. |
+| TrayUI | Carries over unchanged | System tray icon, context menu, settings window. |
+| ~~FocusMonitor~~ | **Removed** | Out of scope. |
+| ~~CaretMonitor~~ | **Removed** | Out of scope. |
+
+## DDABridge — Component Contract
+
+DDABridge is the **only** component that touches DXGI or Direct3D 11. No other component should `#include` D3D/DXGI headers or call D3D/DXGI functions. This isolates the capture/render pipeline to one file.
+
+**Public interface:** `setTransform(float zoom, int xOff, int yOff)` — identical to the old MagBridge. All upstream components (ZoomController, ViewportTracker, RenderLoop) are API-agnostic.
+
+### DDABridge Internals
+
+- **Capture:** `IDXGIOutputDuplication` on the primary monitor. Acquires desktop frames as GPU textures. Handles `DXGI_ERROR_ACCESS_LOST` by re-creating the duplication object (happens on resolution change, desktop switch, UAC prompt).
+- **Rendering:** Full-screen borderless topmost HWND with a D3D11 swap chain. A vertex/pixel shader scales and offsets the captured texture according to the current zoom level and viewport offset. Bilinear filtering for image smoothing ON (default), nearest-neighbor for smoothing OFF.
+- **Software cursor:** Queries `GetCursorInfo()` each frame, draws the current cursor icon at the correct magnified position on the overlay surface. Hides the system cursor in the overlay region when zoom > 1.0×.
+- **Self-capture exclusion:** `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` (Win 10 2004+). This is a Phase 0 risk gate — if exclusion fails, evaluate `Windows.Graphics.Capture` with `IGraphicsCaptureItemInterop` as a fallback.
+- **Frame pacing:** `DwmFlush()` synchronization, same as the original design.
+
+## Overlay Window Strategy
+
+The overlay window is a full-screen borderless topmost HWND.
+
+- **Input passthrough:** Uses `WS_EX_TRANSPARENT | WS_EX_LAYERED` to be fully input-transparent. All pointer input passes through to the desktop beneath. No coordinate remapping or `SendInput` forwarding is needed. Scroll interception for zoom is handled by the global low-level mouse hook, same as the original design.
+- **At 1.0×:** The overlay window is hidden (`ShowWindow(hwnd, SW_HIDE)`). Desktop Duplication capture is paused. GPU cost is zero. This preserves the behavioral contract: at 1.0×, SmoothZoom is perceptually invisible with no visual artifact, no performance impact, and no input interference.
+- **Transition from 1.0× to zoomed:** The overlay materializes and capture begins. This transition must be visually seamless (no flash, pop, or frame skip).
+
+## Threading Model — Two Threads
+
+| Thread | Owns | Key Constraint |
+|--------|------|----------------|
+| **Main** | Message pump, hook callbacks (WH_MOUSE_LL, WH_KEYBOARD_LL), TrayUI, app lifecycle | Hook callbacks must be minimal: read struct, atomic write, return. No computation, no I/O, no COM, no blocking. |
+| **Render** | RenderLoop frame tick, DDABridge (D3D11 device, swap chain, Desktop Duplication), DwmFlush() | No heap allocation, no mutex, no I/O, no blocking calls except DwmFlush(). |
+
+There is **no UIA thread**. FocusMonitor and CaretMonitor are removed (out of scope).
 
 ### Threading Invariants
 
-These are the rules most likely to cause subtle, hard-to-diagnose bugs if violated:
-
-1. **Hook callbacks must be minimal.** Read event, update an atomic or post a message, return. No computation, no I/O, no allocation. The system silently deregisters hooks that exceed ~300ms. (R-05)
+1. **Hook callbacks must be minimal.** Read event, update an atomic or post a message, return. No computation, no I/O, no allocation. The system silently deregisters hooks that exceed ~300ms.
 2. **Render thread: no heap allocation, no mutexes, no I/O on the per-frame hot path.** All data comes from pre-allocated shared state via atomics or SeqLock.
-3. **Render thread must pump messages.** `MagSetFullscreenTransform` offsets are silently ignored without a `PeekMessage`/`DispatchMessage` loop on the calling thread. The zoom factor applies but the viewport stays at (0,0). This is undocumented Win32 behavior.
-4. **UIA thread is isolated.** Slow UIA providers (Java, some Electron apps) must never block hooks or drop frames. Timeout bounding-rect queries at 100ms. (R-11)
-5. **`MagSetInputTransform` is not called per-frame.** Only `MagSetFullscreenTransform` is called each frame tick. Proportional viewport mapping makes per-frame input transform redundant; enabling it causes a `GetCursorPos` feedback loop. `MagSetInputTransform(FALSE)` is called only at shutdown and in the crash handler to ensure clean state. (R-04)
-6. **Settings use atomic pointer swap.** Immutable snapshot struct, copy-on-write. Readers never lock.
+3. **No per-frame logging.** Log only on state transitions (zoom started/ended, error detected, hook re-registered). At 144Hz, per-frame logging is 144 writes/second.
+4. **`GetCursorPos()` for pointer position in RenderLoop, not SharedState.** The low-level mouse hook's `WM_MOUSEMOVE` is unreliable under fullscreen magnification. `GetCursorPos()` is a fast shared-memory read (~1µs) that always returns the true position.
+5. **Use `double` for internal zoom math, `float` only at the API boundary.** Prevents floating-point accumulation drift over long sessions. Snap to exactly 1.0 when within epsilon (0.005).
+6. **Integer division in viewport math is a bug.** `screenW / zoom` must be floating-point division. Integer truncation causes click-offset errors that worsen at higher zoom levels.
+7. **Settings use atomic pointer swap.** Immutable snapshot struct, copy-on-write. Readers never lock.
 
 ### Shared State Mechanisms
 
-- **Atomics:** modifier key state, scroll delta accumulator (exchange-with-0), timestamps
-- **SeqLock:** pointer position, focus rectangle, caret rectangle (small structs, infrequent writes, frequent reads)
+- **Atomics:** modifier key state, scroll delta accumulator (exchange-with-0), toggle state, timestamps
+- **SeqLock:** pointer position (small struct, infrequent writes, frequent reads)
 - **Lock-free queue:** keyboard commands (Main → Render)
 - **Atomic pointer swap:** settings snapshots (Main → All)
 
+No focus rectangle or caret rectangle shared state (those components are removed).
+
 ## Hard Constraints
 
-Violating these causes silent failure or a broken build. Non-negotiable.
+1. **x64 only.** Desktop Duplication API is x64.
+2. **Windows 10 version 2004+** (build 19041) minimum for `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`.
+3. **PerMonitorV2 DPI awareness** in manifest. Without it, coordinates are virtualized and viewport math breaks.
+4. **No external frameworks.** Pure Win32 + D3D11 + C++17 + MSVC. Only optional external dep: nlohmann/json (header-only).
+5. **Secure desktop inaccessible.** `IDXGIOutputDuplication` cannot capture Ctrl+Alt+Delete, UAC, lock screen.
+6. **DRM/HDCP-protected content** will appear black in the magnified view. This is a known limitation — do not attempt to work around it.
+7. **Single-monitor only** in this fork.
+8. **UIAccess and code signing are NOT required.** The Desktop Duplication API does not need them.
 
-1. **UIAccess + signed binary.** Manifest must declare `uiAccess="true"`. Binary must be signed (self-signed OK for dev) and run from a secure location. Without this, `MagSetFullscreenTransform` silently returns FALSE. (R-12)
-2. **x64 only.** Magnification API unsupported under WOW64.
-3. **PerMonitorV2 DPI awareness** in manifest. Without it, coordinates are virtualized and viewport math breaks on mixed-DPI setups.
-4. **Single magnifier limit.** Detect native Magnifier and advise user. (AC-ERR.01)
-5. **Secure desktop inaccessible.** Magnification API doesn't work on Ctrl+Alt+Delete, UAC, lock screen.
-6. **No external frameworks.** Pure Win32 + C++17 + MSVC. Only optional external dep: nlohmann/json (header-only).
-7. **Windows 10 1903+** minimum platform target.
+## Crash Behavior
+
+With Desktop Duplication, a crash kills the overlay window and the desktop returns to normal (acceptable). This is inherently safer than the Magnification API, where a crash left the screen stuck at the magnified level. An unhandled exception handler is still installed for clean state logging, but the failure mode is benign.
 
 ## Known Issues & Debugging
 
-1. **Viewport stuck at (0,0):** If zoom works but the view doesn't follow the cursor, the render thread's message pump is missing or broken. The Magnification API requires a `PeekMessage`/`DispatchMessage` loop on the calling thread for `MagSetFullscreenTransform` offsets to take effect. This is undocumented — the API returns TRUE and `MagGetFullscreenTransform` reads back the correct values, but DWM does not apply the offsets without processing internal messages. See `render-loop.md` and `mag-bridge.md` rules for details.
-
-2. **Diagnostic strategy for Mag API issues:** Add a temporary `MagGetFullscreenTransform` read-back in `MagBridge::setTransform()` to verify the API stored the requested values. Log both set and get values via `OutputDebugStringW` (viewable in DebugView or VS Output). Remove after verification.
-
-3. **Image Smoothing is always on (API limitation).** `MagSetFullscreenTransform` provides no filtering parameter. `MagSetImageScalingCallback` is deprecated and windowed-mode only. The Magnification API always uses bilinear filtering. AC-2.3.07 is inherently satisfied (smoothing is always on). AC-2.3.08 (nearest-neighbor) and AC-2.3.09 (toggle) are deferred to the Desktop Duplication API migration (R-01, out of scope). The `imageSmoothingEnabled` field is retained in SettingsSnapshot for forward-compatibility.
+1. **DRM-protected content** (Netflix in Edge, some games with anti-cheat) renders as black. Desktop Duplication captures post-compositing and is subject to HDCP restrictions.
+2. **Secure desktop inaccessible**, same as the original.
+3. **Self-capture recursion:** If the overlay appears in the captured frame, you get infinite recursion. Verify `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` is working. If it fails, evaluate `Windows.Graphics.Capture` as a fallback.
+4. **`DXGI_ERROR_ACCESS_LOST`:** Expected on resolution change, desktop switch, UAC prompt. DDABridge must re-create the `IDXGIOutputDuplication` object. Log the event, recover within 1 second.
 
 ## Phased Delivery — Follow Strictly
 
-Do not implement later-phase features prematurely. Each phase produces a runnable, testable build. Check Doc 4 for full exit criteria and AC coverage per phase.
+Do not implement later-phase features prematurely. Each phase produces a runnable, testable build.
 
-| Phase | Name | Key Delivery | Status |
-|-------|------|-------------|--------|
-| 0 | Foundation & Risk Spike | Test harness validating API float precision, latency, hook reliability | Done |
-| 1 | Core Scroll-Gesture Zoom | Smooth Win+Scroll zoom, proportional viewport tracking, Start Menu suppression | Done |
-| 2 | Keyboard Shortcuts & Animation | Win+Plus/Minus/Esc with ease-out, target retargeting, scroll-interrupts-animation | Done |
-| 3 | Accessibility Tracking | UIA thread, focus following, caret following, source priority arbitration | Done |
-| 4 | Temporary Toggle | Ctrl+Alt hold-to-peek, bidirectional, state preservation | Done |
-| 5 | Settings, Tray, Persistence | config.json, settings window, tray icon, configurable modifier/shortcuts | Done |
-| 6 | Polish & Hardening | Color inversion, multi-monitor, crash recovery, conflict detection, perf audit | Current (code complete, testing in progress) |
+| Phase | Name | Key Delivery |
+|-------|------|-------------|
+| 0 | Capture and Render Spike | Hardcoded 2× magnified overlay via DDA + D3D11, self-capture exclusion risk gate |
+| 1 | Input Passthrough and Cursor | Click-through overlay, software cursor rendering |
+| 2 | Scroll-Gesture Zoom (Core Value) | InputInterceptor, WinKeyManager, ZoomController, ViewportTracker, RenderLoop wired to DDABridge. 1.0× hide-overlay behavior. |
+| 3 | Keyboard Shortcuts, Animation, Toggle, Settings, Polish | Keyboard zoom, animated transitions, hold-to-peek, settings UI, tray icon, config.json, hardening |
+
+### Phase 0 — Capture and Render Spike
+
+Minimal harness. Create `IDXGIOutputDuplication` on the primary monitor, acquire frames in a loop, render them scaled to a hardcoded 2× on a full-screen borderless topmost window via D3D11. No input handling, no zoom control.
+
+**Exit criteria:**
+- E0.1: Overlay displays a 2× magnified view of the desktop, updating in real time
+- E0.2: The overlay window itself is not visible in the captured/magnified content (no infinite recursion)
+- E0.3: Visual update appears within one frame of desktop content change
+- E0.4: Framerate stays at display refresh rate (60fps on 60Hz) with <5% GPU utilization on mid-range hardware
+- E0.5: `DXGI_ERROR_ACCESS_LOST` recovery works: change display resolution while running, capture resumes within 1 second
+
+**Risk gate:** If E0.2 fails (self-capture exclusion doesn't work), evaluate `Windows.Graphics.Capture` with monitor capture + border suppression as an alternative capture backend before proceeding.
+
+### Phase 1 — Input Passthrough and Cursor
+
+Make the overlay click-through. Implement software cursor rendering. Still hardcoded 2× zoom.
+
+**Exit criteria:**
+- E1.1: With overlay at 2×, clicking a desktop button activates it
+- E1.2: Dragging a window title bar moves the window correctly
+- E1.3: Hover states (button highlights, hyperlink cursor changes, tooltips) work
+- E1.4: Software cursor displays at the correct magnified position with the correct icon
+- E1.5: Right-click context menus appear at the correct position
+
+### Phase 2 — Scroll-Gesture Zoom (Core Value)
+
+Wire up InputInterceptor, WinKeyManager, ZoomController, ViewportTracker, and RenderLoop to DDABridge. Also implements the 1.0× hide-overlay behavior.
+
+**ACs covered:** AC-2.1.01–AC-2.1.18, AC-2.2.01–AC-2.2.03 + AC-2.2.10, AC-2.3.01–AC-2.3.13, AC-2.4.01–AC-2.4.13.
+
+**Exit criteria:**
+- E2.1: Hold Win + scroll up: screen zooms in smoothly centered on pointer
+- E2.2: Hold Win + scroll down: screen zooms out. At 1.0×, overlay disappears, further scroll-down has no effect
+- E2.3: Zoom cannot exceed 10.0×, decelerates into the bound
+- E2.4: Release Win after scrolling: Start Menu does NOT open
+- E2.5: Win press-and-release without scroll: Start Menu opens normally
+- E2.6: While zoomed, move pointer: viewport glides proportionally
+- E2.7: While zoomed, click a button: correct button activates
+- E2.8: At 1.0×, no visual artifact, no performance impact, no input latency
+- E2.9: Transition from 1.0× to zoomed is visually seamless
+
+### Phase 3 — Keyboard Shortcuts, Animation, Toggle, Settings, and Polish
+
+Combines keyboard-driven zoom with animated transitions, temporary toggle, settings UI, tray icon, config.json persistence, and hardening.
+
+**ACs covered:** AC-2.2.04–AC-2.2.10, AC-2.8.01–AC-2.8.10, AC-2.7.01–AC-2.7.12, AC-2.9.01–AC-2.9.19, AC-ERR.03–AC-ERR.04.
 
 ## Component Boundaries
 
 Each component has a single responsibility. No component reaches into another's internals. Communication only through shared state or defined interfaces.
 
-- **MagBridge** is the only file that `#include`s `Magnification.h`. This isolates a future migration to Desktop Duplication API. (R-01)
+- **DDABridge** is the only file that includes DXGI/D3D11 headers. No other component calls DXGI or D3D functions.
 - **WinKeyManager** is factored out of InputInterceptor for testability of the Win key state machine.
 - **InputInterceptor** never consumes keyboard events (only observes). It consumes scroll events only when the modifier is held.
-- **ViewportTracker** arbitrates between sources: active typing → Caret; recent focus change (after 100ms debounce) → Focus; otherwise → Pointer. Transitions between sources animate over 200ms.
-- **ZoomController** has four modes: IDLE, SCROLL_DIRECT, ANIMATING, TOGGLING. Uses `double` internally for zoom math, converts to `float` only at the API boundary. Snaps to 1.0× within epsilon 0.005. (R-17)
-
-## Top Risks Affecting Daily Coding
-
-1. **R-05 (Hook Deregistration)** — Will happen. Watchdog timer every 5s detects and reinstalls. Keep hook callbacks absolutely minimal.
-2. **R-04 (Input Transform Desync)** — Proportional viewport mapping is the defense. Click accuracy depends on correct offset math. Test at 5× zoom across screen positions.
-3. **R-14 (Crash Leaves Screen Magnified)** — Install `SetUnhandledExceptionFilter` to reset zoom. Write dirty-shutdown sentinel file. Handle `WM_ENDSESSION`.
-4. **R-01 (API Deprecation)** — MagBridge isolation bounds the migration. Monitor Windows Insider builds.
-5. **R-09 (UIA Inconsistency)** — Validate every bounding rectangle from UIA. Reject zero-area, negative, off-screen. Degrade gracefully.
+- **ViewportTracker** is pointer-only in this fork. No multi-source priority arbitration, no `determineActiveSource()`.
+- **ZoomController** has four modes: IDLE, SCROLL_DIRECT, ANIMATING, TOGGLING. Uses `double` internally for zoom math, converts to `float` only at the API boundary. Snaps to 1.0× within epsilon 0.005.
 
 ## Build Requirements
 
 - C++17, MSVC (VS 2022+), CMake, x64 only.
-- Link: `Magnification.lib`, `Dwmapi.lib`, `UIAutomationCore.lib`, `User32.lib`, `Shell32.lib`, `Ole32.lib`, `OleAut32.lib`, `Wtsapi32.lib`, `Hid.lib`, `Advapi32.lib`, `Comctl32.lib`.
-- All builds signed. Self-signed cert installed to Trusted Root CA for dev.
-- Run from secure folder (e.g., `C:\Program Files\SmoothZoom\`).
+- Link: `d3d11.lib`, `dxgi.lib`, `d3dcompiler.lib`, `Dwmapi.lib`, `User32.lib`, `Shell32.lib`, `Ole32.lib`, `OleAut32.lib`, `Wtsapi32.lib`, `Hid.lib`, `Advapi32.lib`, `Comctl32.lib`.
+- No code signing required. No UIAccess manifest required. No secure folder installation required.
+- Unit tests: `ctest -C Debug` from the build directory. Cover pure logic (ZoomController, ViewportTracker, WinKeyManager).
