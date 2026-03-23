@@ -178,14 +178,15 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
-# Phase 0 test harness — standalone risk spike (Doc 4 §3)
+# Phase 0 test harness — Desktop Duplication API spike (DXZoom Phase 0)
 # ---------------------------------------------------------------------------
 add_executable(Phase0Harness WIN32
     src/app/phase0_harness.cpp
 )
 if(WIN32)
     target_link_libraries(Phase0Harness PRIVATE
-        Magnification.lib
+        d3d11.lib
+        dxgi.lib
         Dwmapi.lib
         User32.lib
     )
@@ -195,7 +196,7 @@ target_include_directories(Phase0Harness PRIVATE
 )
 if(MSVC)
     set_target_properties(Phase0Harness PROPERTIES
-        LINK_FLAGS "/MANIFEST:EMBED /MANIFESTUAC:NO /MANIFESTINPUT:\"${CMAKE_SOURCE_DIR}/res/SmoothZoom.manifest\""
+        LINK_FLAGS "/MANIFEST:EMBED /MANIFESTUAC:NO /MANIFESTINPUT:\"${CMAKE_SOURCE_DIR}/res/DXZoom.manifest\""
     )
 endif()
 
