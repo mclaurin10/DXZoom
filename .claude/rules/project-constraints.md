@@ -1,4 +1,4 @@
-# SmoothZoom-DDA — Project-Wide Constraints
+# DXZoom — Project-Wide Constraints
 
 ## Current Phase: Phase 0 (Capture and Render Spike)
 
@@ -77,7 +77,7 @@ Each component has a single responsibility. Do not merge components or move resp
 
 6. **Integer division in viewport math is a bug.** `screenW / zoom` must be floating-point division. Integer truncation causes click-offset errors that worsen at higher zoom levels.
 
-7. **At zoom 1.0×, overlay is hidden and capture is paused.** Zero GPU cost when not zoomed. This preserves the behavioral contract: at 1.0×, SmoothZoom-DDA is perceptually invisible.
+7. **At zoom 1.0×, overlay is hidden and capture is paused.** Zero GPU cost when not zoomed. This preserves the behavioral contract: at 1.0×, DXZoom is perceptually invisible.
 
 ## Build Constraints
 

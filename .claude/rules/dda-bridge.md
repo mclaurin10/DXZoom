@@ -121,7 +121,7 @@ When zoom transitions above 1.0×:
 
 This transition must be visually seamless — no flash, pop, or frame skip.
 
-**Why:** At 1.0×, SmoothZoom-DDA must be perceptually invisible with no visual artifact, no performance impact, and no input interference. Hiding the overlay and pausing capture ensures this.
+**Why:** At 1.0×, DXZoom must be perceptually invisible with no visual artifact, no performance impact, and no input interference. Hiding the overlay and pausing capture ensures this.
 
 ## Overlay Input Passthrough
 

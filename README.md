@@ -1,6 +1,6 @@
-# SmoothZoom-DDA
+# DXZoom
 
-Full-screen magnification for Windows using the Desktop Duplication API. Hold Win+Scroll to smoothly zoom the entire desktop up to 10× — the viewport follows your cursor naturally with fluid, pointer-centered tracking. No stepped increments, no jarring jumps. Native C++17, pure Win32, Direct3D 11.
+Full-screen magnification for Windows using the Desktop Duplication API. Hold Win+Scroll (or Shift+Scroll) to smoothly zoom the entire desktop up to 10× — the viewport follows your cursor naturally with fluid, pointer-centered tracking. No stepped increments, no jarring jumps. Native C++17, pure Win32, Direct3D 11.
 
 ## Why This Fork Exists
 
@@ -14,7 +14,7 @@ The tradeoff is that Desktop Duplication requires building the capture, renderin
 
 ## Features
 
-- **Scroll-gesture zoom** — Hold Win and scroll to zoom in/out continuously
+- **Scroll-gesture zoom** — Hold Win (or Shift) and scroll to zoom in/out continuously
 - **Pointer-centered viewport tracking** — The magnified view follows your cursor proportionally across the desktop
 - **Keyboard shortcuts** — Win+Plus/Minus for animated step zoom, Win+Esc to reset
 - **Animated transitions** — Ease-out zoom animations with retargeting and scroll-interrupts-animation
@@ -36,7 +36,7 @@ This fork focuses on single-monitor pointer-based zoom. The following features f
 
 | Shortcut | Action |
 |----------|--------|
-| Win + Scroll wheel | Zoom in/out (continuous) |
+| Modifier + Scroll wheel | Zoom in/out (continuous, configurable: Win [default] / Shift / Ctrl / Alt) |
 | Win + Plus / Minus | Zoom in/out (animated step) |
 | Win + Esc | Reset to 1× (animated) |
 | Ctrl+Alt (hold) | Temporary toggle (peek at zoom/unzoom) |
@@ -58,7 +58,7 @@ This fork focuses on single-monitor pointer-based zoom. The following features f
 scripts\build.bat
 
 # Run
-.\build\Debug\SmoothZoom.exe
+.\build\Debug\DXZoom.exe
 ```
 
 ### Unit Tests

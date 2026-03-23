@@ -1,8 +1,8 @@
-# SmoothZoom-DDA
+# DXZoom
 
 **Current Status:** Phase 0 — Capture and Render Spike (planned). Implementation has not yet started.
 
-Native C++17 Win32 full-screen magnifier for Windows. Hold Win+Scroll to smoothly zoom up to 10× with continuous viewport tracking of the pointer. Uses the Desktop Duplication API (`IDXGIOutputDuplication`) and Direct3D 11 rendering.
+Native C++17 Win32 full-screen magnifier for Windows. Hold Win+Scroll (or Shift+Scroll) to smoothly zoom up to 10× with continuous viewport tracking of the pointer. Uses the Desktop Duplication API (`IDXGIOutputDuplication`) and Direct3D 11 rendering.
 
 This is a fork of SmoothZoom that replaces the Windows Magnification API with the Desktop Duplication API. The Magnification API is legacy technology and imposes hard constraints (UIAccess, code signing, secure folder installation). The Desktop Duplication API removes these constraints but requires building the capture, rendering, input-passthrough, and cursor-drawing pipeline from scratch.
 
@@ -10,7 +10,7 @@ This is a fork of SmoothZoom that replaces the Windows Magnification API with th
 
 Single-process, four layers, nine components:
 
-- **Input Layer:** InputInterceptor (hooks), WinKeyManager (Win key + Start Menu suppression)
+- **Input Layer:** InputInterceptor (hooks), WinKeyManager (Win key + Start Menu suppression when modifier is Win)
 - **Logic Layer:** ZoomController (zoom state/animation), ViewportTracker (offset, pointer-only), RenderLoop (frame tick engine)
 - **Output Layer:** DDABridge (Desktop Duplication capture + D3D11 rendering), CursorRenderer (software cursor drawing, integrated into DDABridge)
 - **Support Layer:** SettingsManager (config.json + snapshots), TrayUI (tray icon + settings window)
@@ -29,7 +29,7 @@ These are the rules most likely to cause subtle, hard-to-diagnose bugs if violat
 1. **Hook callbacks must be minimal.** Read event, update an atomic or post a message, return. No computation, no I/O, no allocation. The system silently deregisters hooks that exceed ~300ms.
 2. **Render thread: no heap allocation, no mutexes, no I/O on the per-frame hot path.** All data comes from pre-allocated shared state via atomics or SeqLock.
 3. **DDABridge is the only component that touches DXGI or Direct3D 11.** No other component may include DXGI/D3D11 headers or call DXGI/D3D11 functions. This isolates future migrations.
-4. **At zoom 1.0×, the overlay is hidden and capture is paused.** Zero GPU cost when not zoomed. This preserves the behavioral contract: at 1.0×, SmoothZoom-DDA is perceptually invisible.
+4. **At zoom 1.0×, the overlay is hidden and capture is paused.** Zero GPU cost when not zoomed. This preserves the behavioral contract: at 1.0×, DXZoom is perceptually invisible.
 5. **Settings use atomic pointer swap.** Immutable snapshot struct, copy-on-write. Readers never lock.
 
 ### Shared State Mechanisms
@@ -74,7 +74,7 @@ MagBridge encapsulated all Magnification API calls. It is replaced by **DDABridg
 - At zoom level 1.0×, the overlay window is **hidden** (`ShowWindow(hwnd, SW_HIDE)`)
 - Desktop Duplication capture is paused
 - GPU cost is zero
-- This preserves the behavioral contract: at 1.0×, SmoothZoom-DDA is perceptually invisible with no visual artifact, no performance impact, and no input interference
+- This preserves the behavioral contract: at 1.0×, DXZoom is perceptually invisible with no visual artifact, no performance impact, and no input interference
 - When zoom transitions above 1.0×, the overlay materializes and capture begins
 - This transition must be visually seamless
 
@@ -89,7 +89,7 @@ Integrated into DDABridge. Queries `GetCursorInfo()` each frame and draws the cu
 - **ZoomController** — zoom state, logarithmic scroll-to-zoom model, `SCROLL_DIRECT` / `ANIMATING` / `TOGGLING` / `IDLE` modes, soft-approach bounds clamping, target retargeting
 - **ViewportTracker** — proportional mapping, edge clamping, deadzone. **Note:** With focus/caret following out of scope, ViewportTracker is pointer-only. No `determineActiveSource()` priority arbitration, no SeqLock focus/caret rectangles.
 - **RenderLoop** — frame-tick loop on the Render Thread, `DwmFlush` sync, drains scroll accumulator and keyboard command queue, calls ZoomController, calls ViewportTracker, calls DDABridge. Identical structure, just calls `ddaBridge.setTransform()` instead of `magBridge.setTransform()`.
-- **SettingsManager** — `config.json` in `%AppData%\SmoothZoom\`, immutable snapshot with atomic pointer swap
+- **SettingsManager** — `config.json` in `%AppData%\DXZoom\`, immutable snapshot with atomic pointer swap
 - **TrayUI** — system tray icon, context menu, settings window
 
 ### Removed Components
@@ -172,12 +172,14 @@ Wire up InputInterceptor, WinKeyManager, ZoomController, ViewportTracker, and Re
 
 Also implements the 1.0× hide-overlay behavior: overlay hidden and capture paused at 1.0×, overlay shown and capture started on zoom > 1.0×.
 
+**Modifier key support:** The modifier key that activates scroll-gesture zoom is configurable. Supported modifiers: **Win (default), Shift, Ctrl, Alt**. In Phase 2, the modifier is a compile-time constant that can be changed in the code. The runtime-configurable settings UI for the modifier key arrives in Phase 3. When the modifier is not Win, WinKeyManager is disabled entirely (no Start Menu suppression logic runs).
+
 **Exit criteria:**
-- E2.1: Hold Win + scroll up: screen zooms in smoothly centered on pointer
-- E2.2: Hold Win + scroll down: screen zooms out. At 1.0×, overlay disappears, further scroll-down has no effect
+- E2.1: Hold modifier (Win or Shift) + scroll up: screen zooms in smoothly centered on pointer
+- E2.2: Hold modifier + scroll down: screen zooms out. At 1.0×, overlay disappears, further scroll-down has no effect
 - E2.3: Zoom cannot exceed 10.0×, decelerates into the bound
-- E2.4: Release Win after scrolling: Start Menu does NOT open
-- E2.5: Win press-and-release without scroll: Start Menu opens normally
+- E2.4: (When modifier is Win) Release Win after scrolling: Start Menu does NOT open
+- E2.5: (When modifier is Win) Win press-and-release without scroll: Start Menu opens normally
 - E2.6: While zoomed, move pointer: viewport glides proportionally
 - E2.7: While zoomed, click a button: correct button activates
 - E2.8: At 1.0×, no visual artifact, no performance impact, no input latency
@@ -185,7 +187,7 @@ Also implements the 1.0× hide-overlay behavior: overlay hidden and capture paus
 
 ### Phase 3 — Keyboard, Toggle, Settings, and Polish
 
-Combines the original Phases 2, 4, and 5. Adds keyboard-driven zoom with animated transitions, temporary toggle (hold-to-peek), settings UI, tray icon, config.json persistence, and hardening (`DXGI_ERROR_ACCESS_LOST` recovery, hook robustness watchdog).
+Combines the original Phases 2, 4, and 5. Adds keyboard-driven zoom with animated transitions, temporary toggle (hold-to-peek), settings UI (including runtime-configurable modifier key selection), tray icon, config.json persistence, and hardening (`DXGI_ERROR_ACCESS_LOST` recovery, hook robustness watchdog).
 
 **Note:** Color inversion, multi-monitor support, and UIA-based focus/caret following are **out of scope** and will not be implemented.
 

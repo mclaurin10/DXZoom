@@ -27,12 +27,14 @@ Every hook callback must:
 ```
 WH_MOUSE_LL callback:
   WM_MOUSEWHEEL + modifier held → atomic-add delta to scrollAccumulator,
-                                   set winKeyUsedForZoom = true,
+                                   if modifier is Win: set winKeyUsedForZoom = true,
                                    return 1 (CONSUME)
   WM_MOUSEMOVE                  → write (x, y) to shared state,
                                    return CallNextHookEx (PASS THROUGH)
   Everything else               → return CallNextHookEx (PASS THROUGH)
 ```
+
+**Modifier key support:** The modifier key that activates scroll-gesture zoom is configurable. Supported modifiers: **Win (default), Shift, Ctrl, Alt**. The `winKeyUsedForZoom` flag is only relevant when the modifier is Win (for Start Menu suppression). For Shift/Ctrl/Alt modifiers, scroll consumption still happens but the flag is not set.
 
 **Only `WM_MOUSEWHEEL` with the modifier held is consumed.** All other mouse events pass through unconditionally. Consuming the wrong event breaks other applications. (AC-2.1.02)
 
@@ -74,7 +76,7 @@ IDLE ──────────────────► WIN_HELD
 
 **Critical edge case: Win+E, Win+D, Win+L, etc.** If the user presses Win, scrolls, then presses another key, `usedWithOtherKey` is set. On release, do NOT suppress — the user expects the Win+key shortcut to execute normally. Suppressing would break the shortcut. (AC-2.1.18)
 
-**When modifier is not Win:** WinKeyManager is disabled entirely. It does nothing. Start Menu suppression is irrelevant for Ctrl/Alt/Shift modifiers. (AC-2.1.20, Phase 5)
+**When modifier is not Win:** WinKeyManager is disabled entirely. It does nothing. Start Menu suppression is irrelevant for Shift/Ctrl/Alt modifiers. This behavior is supported from Phase 2 onward — the system correctly handles any of the four modifier keys (Win, Shift, Ctrl, Alt) as a compile-time constant. Runtime-configurable modifier selection via settings UI arrives in Phase 3.
 
 ## Hook Health Watchdog
 
